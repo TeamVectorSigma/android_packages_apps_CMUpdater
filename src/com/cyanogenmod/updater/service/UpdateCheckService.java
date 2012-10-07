@@ -19,6 +19,8 @@ import android.content.SharedPreferences;
 import android.content.res.Resources;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.AsyncTask;
 import android.os.Handler;
 import android.os.IBinder;
@@ -72,6 +74,7 @@ public class UpdateCheckService extends Service {
     private Integer mCurrentBuildDate;
     private boolean mShowNightlyRomUpdates;
     private boolean mShowAllRomUpdates;
+    private AutoCheckForUpdatesTask mTask;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -89,26 +92,35 @@ public class UpdateCheckService extends Service {
 
     @Override
     public void onStart(Intent intent, int startId) {
-        // Parse the intent
-        boolean doCheck = intent.getBooleanExtra(Constants.CHECK_FOR_UPDATE, false);
-        if (doCheck) {
-            // If we should check for updates on start, do so in a seperate thread
-            new AutoCheckForUpdatesTask().execute();
+        // See if we have an intent to parse
+        if (intent != null) {
+            boolean doCheck = intent.getBooleanExtra(Constants.CHECK_FOR_UPDATE, false);
+            if (doCheck) {
+                // If we should check for updates on start, do so in a seperate thread
+                if (mTask == null || mTask.getStatus() == AsyncTask.Status.FINISHED) {
+                    Log.i(TAG, "Checking for updates...");
+                    mTask = new AutoCheckForUpdatesTask();
+                    mTask.execute();
+                }
+            }
         }
     }
 
     @Override
     public void onDestroy() {
         mCallbacks.kill();
+        if (mTask != null && mTask.getStatus() != AsyncTask.Status.FINISHED) {
+            mTask.cancel(true);
+        }
         super.onDestroy();
     }
 
     //*********************************************************
     // Supporting methods and classes
     //*********************************************************
-    private class AutoCheckForUpdatesTask extends AsyncTask<Void, Void, Void> {
+    private class AutoCheckForUpdatesTask extends AsyncTask<Void, Void, Integer> {
         @Override
-        protected Void doInBackground(Void... params) {
+        protected Integer doInBackground(Void... params) {
             checkForNewUpdates();
             return null;
         }
@@ -133,7 +145,23 @@ public class UpdateCheckService extends Service {
         mToastHandler.sendMessage(mToastHandler.obtainMessage(0, ex));
     }
 
+    private boolean isOnline() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo netInfo = cm.getActiveNetworkInfo();
+        if (netInfo != null && netInfo.isConnected()) {
+            return true;
+        }
+        return false;
+    }
+
     private void checkForNewUpdates() {
+        if (!isOnline()) {
+            // Only check for updates if the phone is actually connected to a network
+            Log.i(TAG, "Could not check for updates. Not connected to the network.");
+            return;
+        }
+
+        // Start the update check
         FullUpdateInfo availableUpdates;
         while (true) {
             try {
@@ -150,13 +178,18 @@ public class UpdateCheckService extends Service {
             }
         }
 
-        // Store the last update check time
+        // Store the last update check time and ensure boot check completed is true
         Date d = new Date();
         SharedPreferences prefs = getSharedPreferences("CMUpdate", Context.MODE_MULTI_PROCESS);
         prefs.edit().putLong(Constants.LAST_UPDATE_CHECK_PREF, d.getTime()).apply();
+        prefs.edit().putBoolean(Constants.BOOT_CHECK_COMPLETED, true).apply();
 
         int updateCountRoms = availableUpdates.getRomCount();
         int updateCount = availableUpdates.getUpdateCount();
+
+        // Write to log
+        Log.i(TAG, "The update check successfully completed at " + d.toString() + " and found "
+                + updateCountRoms + " updates.");
 
         if (updateCountRoms == 0) {
             mToastHandler.sendMessage(mToastHandler.obtainMessage(0, R.string.no_updates_found, 0));
